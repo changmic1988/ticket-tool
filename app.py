@@ -17,8 +17,6 @@ st.markdown("""
 <style>
     .main-title { font-size: 26px; font-weight: bold; color: #1E3A8A; margin-bottom: 5px; }
     .sub-title { font-size: 14px; color: #4B5563; margin-bottom: 20px; }
-    .stTabs [data-baseweb="tab-list"] { gap: 15px; }
-    .stTabs [data-baseweb="tab"] { font-size: 16px; font-weight: bold; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -135,8 +133,88 @@ with st.sidebar:
 
     start_btn = st.button("🚀 開始擷取並產生統計", type="primary", use_container_width=True)
 
-# ----------------- 各平台直連模組 -----------------
+# ----------------- KKTIX 雲端直連與多通道備援 -----------------
+def fetch_kktix():
+    records = []
+    logs = []
 
+    # 通道 1：官方 Atom 直連 (附真實瀏覽器 Header)
+    direct_url = "https://kktix.com/events.atom"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+        "Accept": "application/atom+xml,text/xml,application/xhtml+xml,text/html;q=0.9,*/*;q=0.8"
+    }
+    
+    xml_content = None
+    try:
+        r = requests.get(direct_url, headers=headers, timeout=10)
+        logs.append(f"通道 1 (官方直連) 狀態碼: {r.status_code}")
+        if r.status_code == 200 and len(r.content) > 1000:
+            xml_content = r.content
+    except Exception as e:
+        logs.append(f"通道 1 異常: {e}")
+
+    # 通道 2：若官方擋海外 IP，走雲端跨域代理通道
+    if not xml_content:
+        proxy_url = "https://api.rss2json.com/v1/api.json?rss_url=https%3A%2F%2Fkktix.com%2Fevents.atom"
+        try:
+            r2 = requests.get(proxy_url, timeout=10)
+            logs.append(f"通道 2 (代理 JSON) 狀態碼: {r2.status_code}")
+            if r2.status_code == 200:
+                data = r2.json()
+                for it in data.get("items", []):
+                    t = it.get("title", "").strip()
+                    l = it.get("link", "")
+                    pub = it.get("pubDate", "")[:10]
+                    cat = "其他"
+                    if any(w in t for w in ["劇", "戲曲", "喜劇", "脫口秀"]): cat = "戲劇"
+                    elif any(w in t for w in ["音樂", "演唱會", "樂團", "LIVE"]): cat = "音樂"
+                    elif any(w in t for w in ["舞", "芭蕾"]): cat = "舞蹈"
+                    records.append({
+                        "售票通路": "KKTIX",
+                        "節目分類": cat,
+                        "節目名稱": t,
+                        "演出場次時間": pub if pub else "即期",
+                        "演出地點": "詳見售票頁",
+                        "售票狀況/連結": l
+                    })
+                return records, logs
+        except Exception as e:
+            logs.append(f"通道 2 異常: {e}")
+
+    # 解析通道 1 的 XML
+    if xml_content:
+        try:
+            root = ET.fromstring(xml_content)
+            ns = {'atom': 'http://www.w3.org/2005/Atom'}
+            for entry in root.findall('atom:entry', ns):
+                t_elem = entry.find('atom:title', ns)
+                l_elem = entry.find('atom:link', ns)
+                p_elem = entry.find('atom:published', ns)
+                title = t_elem.text.strip() if t_elem is not None and t_elem.text else ""
+                link = l_elem.attrib.get('href', '') if l_elem is not None else ""
+                date_str = p_elem.text[:10] if p_elem is not None and p_elem.text else "即期"
+
+                cat = "其他"
+                if any(w in title for w in ["劇", "戲曲", "喜劇", "脫口秀"]): cat = "戲劇"
+                elif any(w in title for w in ["音樂", "演唱會", "樂團", "LIVE"]): cat = "音樂"
+                elif any(w in title for w in ["舞", "芭蕾"]): cat = "舞蹈"
+
+                if title:
+                    records.append({
+                        "售票通路": "KKTIX",
+                        "節目分類": cat,
+                        "節目名稱": title,
+                        "演出場次時間": date_str,
+                        "演出地點": "詳見售票頁",
+                        "售票狀況/連結": link
+                    })
+        except Exception as e:
+            logs.append(f"XML 解析異常: {e}")
+
+    return records, logs
+
+# ----------------- OPENTIX 直連 -----------------
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_opentix():
     api_url = "https://csm.api.opentix.life/programs"
@@ -153,6 +231,7 @@ def fetch_opentix():
         except Exception: break
     return all_programs
 
+# ----------------- UDN 直連 -----------------
 def fetch_udn(selected_categories):
     udn_records = []
     base_url = "https://tickets.udnfunlife.com"
@@ -183,6 +262,7 @@ def fetch_udn(selected_categories):
             except Exception: pass
     return udn_records
 
+# ----------------- 寬宏直連 -----------------
 def fetch_kham():
     records = []
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -210,6 +290,7 @@ def fetch_kham():
         except Exception: pass
     return records
 
+# ----------------- 年代直連 -----------------
 def fetch_era():
     records = []
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -240,59 +321,6 @@ def fetch_era():
         except Exception: pass
     return records
 
-@st.cache_data(ttl=1800, show_spinner=False)
-def fetch_kktix():
-    records = []
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
-        "Accept": "application/atom+xml,application/xml,text/xml;q=0.9,*/*;q=0.8"
-    }
-    try:
-        r = requests.get("https://kktix.com/events.atom", headers=headers, timeout=12)
-        if r.status_code == 200:
-            root = ET.fromstring(r.content)
-            ns = {'atom': 'http://www.w3.org/2005/Atom'}
-            for entry in root.findall('atom:entry', ns):
-                t_elem = entry.find('atom:title', ns)
-                l_elem = entry.find('atom:link', ns)
-                p_elem = entry.find('atom:published', ns)
-
-                title = t_elem.text.strip() if t_elem is not None and t_elem.text else ""
-                link = l_elem.attrib.get('href', '') if l_elem is not None else ""
-
-                date_str = "即期 (詳見售票頁)"
-                if p_elem is not None and p_elem.text:
-                    try:
-                        raw_dt = p_elem.text
-                        date_str = raw_dt[:10]
-                    except Exception:
-                        pass
-
-                cat = "其他"
-                if any(w in title for w in ["劇", "戲曲", "讀劇", "喜劇", "脫口秀", "漫才"]):
-                    cat = "戲劇"
-                elif any(w in title for w in ["音樂", "演唱會", "樂團", "演奏", "聲樂", "合唱", "LIVE"]):
-                    cat = "音樂"
-                elif any(w in title for w in ["舞", "芭蕾"]):
-                    cat = "舞蹈"
-                elif any(w in title for w in ["親子", "兒童"]):
-                    cat = "親子"
-
-                if title:
-                    records.append({
-                        "售票通路": "KKTIX",
-                        "節目分類": cat,
-                        "節目名稱": title,
-                        "演出場次時間": date_str,
-                        "演出地點": "詳見售票頁",
-                        "售票狀況/連結": link
-                    })
-    except Exception:
-        pass
-    return records
-
-# ----------------- 執行流程 -----------------
-
 if start_btn:
     if not selected_cats:
         st.warning("⚠️ 請至少勾選一種節目種類！")
@@ -305,7 +333,18 @@ if start_btn:
 
         status_box.info(f"正在連線【{selected_platform_label}】官網即時擷取資料...")
 
-        if target_platform == "OPENTIX":
+        if target_platform == "KKTIX":
+            shows, logs = fetch_kktix()
+            pbar.progress(60)
+            if logs:
+                with st.expander("🔍 連線狀態紀錄", expanded=(len(shows) == 0)):
+                    for lg in logs: st.write(lg)
+            for s in shows:
+                s["所屬藝術節/系列"] = extract_festival(s["節目名稱"], "", custom_fest_list)
+                s["演出單位"] = extract_performer(s["節目名稱"])
+                detail_records.append(s)
+
+        elif target_platform == "OPENTIX":
             programs = fetch_opentix()
             pbar.progress(50)
             for prog in programs:
@@ -378,15 +417,6 @@ if start_btn:
             shows = fetch_era()
             pbar.progress(60)
             for s in shows:
-                s["所屬藝術節/系列"] = extract_festival(s["節目名稱"], "", custom_fest_list)
-                s["演出單位"] = extract_performer(s["節目名稱"])
-                detail_records.append(s)
-
-        elif target_platform == "KKTIX":
-            shows = fetch_kktix()
-            pbar.progress(60)
-            for s in shows:
-                # KKTIX 一律完整收錄，不因類別標籤而過濾掉
                 s["所屬藝術節/系列"] = extract_festival(s["節目名稱"], "", custom_fest_list)
                 s["演出單位"] = extract_performer(s["節目名稱"])
                 detail_records.append(s)
