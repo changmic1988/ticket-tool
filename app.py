@@ -110,13 +110,13 @@ def extract_performer(show_title):
 
 with st.sidebar:
     st.header("⚙️ 統計篩選條件")
-    selected_platform_label = st.selectbox("1. 選擇售票平台：", options=list(PLATFORM_OPTIONS.keys()), index=0)
+    selected_platform_label = st.selectbox("1. 選擇售票平台：", options=list(PLATFORM_OPTIONS.keys()), index=2)
     target_platform = PLATFORM_OPTIONS[selected_platform_label]
 
     selected_cats = st.multiselect(
         "2. 選擇節目種類：",
         options=["戲劇", "音樂", "舞蹈", "親子", "戲曲", "其他"],
-        default=["戲劇", "音樂", "舞蹈", "親子"]
+        default=["戲劇", "音樂", "舞蹈", "親子", "其他"]
     )
 
     today = datetime.date.today()
@@ -243,7 +243,10 @@ def fetch_era():
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_kktix():
     records = []
-    headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"}
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+        "Accept": "application/atom+xml,application/xml,text/xml;q=0.9,*/*;q=0.8"
+    }
     try:
         r = requests.get("https://kktix.com/events.atom", headers=headers, timeout=12)
         if r.status_code == 200:
@@ -253,27 +256,24 @@ def fetch_kktix():
                 t_elem = entry.find('atom:title', ns)
                 l_elem = entry.find('atom:link', ns)
                 p_elem = entry.find('atom:published', ns)
-                summary_elem = entry.find('atom:summary', ns)
 
                 title = t_elem.text.strip() if t_elem is not None and t_elem.text else ""
                 link = l_elem.attrib.get('href', '') if l_elem is not None else ""
-                
-                # 時間解析
+
                 date_str = "即期 (詳見售票頁)"
                 if p_elem is not None and p_elem.text:
                     try:
                         raw_dt = p_elem.text
-                        date_str = raw_dt[:10] + " " + raw_dt[11:16]
+                        date_str = raw_dt[:10]
                     except Exception:
                         pass
 
-                # 自動依標題判斷分類
                 cat = "其他"
                 if any(w in title for w in ["劇", "戲曲", "讀劇", "喜劇", "脫口秀", "漫才"]):
                     cat = "戲劇"
                 elif any(w in title for w in ["音樂", "演唱會", "樂團", "演奏", "聲樂", "合唱", "LIVE"]):
                     cat = "音樂"
-                elif any(w in title for w in ["舞", "芭蕾", "街舞"]):
+                elif any(w in title for w in ["舞", "芭蕾"]):
                     cat = "舞蹈"
                 elif any(w in title for w in ["親子", "兒童"]):
                     cat = "親子"
@@ -386,11 +386,10 @@ if start_btn:
             shows = fetch_kktix()
             pbar.progress(60)
             for s in shows:
-                # 類別篩選
-                if s["節目分類"] in selected_cats or "其他" in selected_cats:
-                    s["所屬藝術節/系列"] = extract_festival(s["節目名稱"], "", custom_fest_list)
-                    s["演出單位"] = extract_performer(s["節目名稱"])
-                    detail_records.append(s)
+                # KKTIX 一律完整收錄，不因類別標籤而過濾掉
+                s["所屬藝術節/系列"] = extract_festival(s["節目名稱"], "", custom_fest_list)
+                s["演出單位"] = extract_performer(s["節目名稱"])
+                detail_records.append(s)
 
         elif target_platform == "ACCUPASS":
             headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://www.accupass.com/"}
@@ -419,7 +418,7 @@ if start_btn:
         if not detail_records:
             status_box.empty()
             pbar.empty()
-            st.warning(f"💡 在所選的【{selected_platform_label}】平台與條件下未找到節目。建議放寬節目種類（勾選「其他」）或調整日期。")
+            st.warning(f"💡 在所選的【{selected_platform_label}】平台與條件下未找到節目。")
         else:
             df_details = pd.DataFrame(detail_records)
             summary_list = []
