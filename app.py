@@ -11,7 +11,6 @@ from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 import urllib3
 
-# 關閉 SSL 不安全連線警告
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 st.set_page_config(page_title="表演藝術演出節目統計系統", page_icon="🎭", layout="wide")
@@ -26,15 +25,15 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.markdown('<div class="main-title">🎭 表演藝術與展演售票節目統計系統</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-title">支援文化部全國藝文資料庫、OPENTIX、UDN、寬宏、年代、ACCUPASS 售票節目統計</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-title">支援 OPENTIX、UDN、寬宏、年代、ACCUPASS 售票節目統計與雙分頁 Excel 匯出</div>', unsafe_allow_html=True)
 
 PLATFORM_OPTIONS = {
-    "🏛️ 文化部全國藝文資料庫 (全台跨平台)": "MOC",
-    "🎟️ OPENTIX (官網直連)": "OPENTIX",
+    "🎟️ OPENTIX (官網直連 - 推薦)": "OPENTIX",
     "🎪 udn 售票網 (官網直連)": "UDN",
     "🎸 寬宏售票 KHAM (官網直連)": "KHAM",
     "🎟️ 年代售票 ERA (官網直連)": "ERA",
-    "🎫 ACCUPASS (活動通專屬)": "ACCUPASS"
+    "🎫 ACCUPASS (活動通專屬)": "ACCUPASS",
+    "🏛️ 文化部藝文資料庫 (跨平台)": "MOC"
 }
 
 CATEGORY_MAP_UDN = {
@@ -111,7 +110,6 @@ def extract_performer(show_title):
 
     return "詳見售票頁"
 
-# 側邊欄控制項
 with st.sidebar:
     st.header("⚙️ 統計篩選條件")
     selected_platform_label = st.selectbox(
@@ -149,10 +147,12 @@ with st.sidebar:
 def fetch_moc():
     api_url = "https://cloud.culture.tw/frontsite/trans/SearchShowAction.do?method=doFindTypeJ"
     headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"}
-    # 加上 verify=False 解決政府伺服器憑證問題
-    r = requests.get(api_url, headers=headers, timeout=25, verify=False)
-    if r.status_code == 200:
-        return r.json()
+    try:
+        r = requests.get(api_url, headers=headers, timeout=20, verify=False)
+        if r.status_code == 200:
+            return r.json()
+    except Exception:
+        pass
     return []
 
 @st.cache_data(ttl=1800, show_spinner=False)
@@ -276,69 +276,71 @@ if start_btn:
             moc_items = fetch_moc()
             pbar.progress(50)
             
-            moc_cat_map = {
-                "1": "音樂", "2": "戲劇", "3": "舞蹈", "4": "親子", "5": "戲曲"
-            }
+            if not moc_items:
+                st.error("⚠️ 文化部伺服器暫時限制海外連線或格式回應異常，建議改選【🎟️ OPENTIX (官網直連)】！")
+            else:
+                moc_cat_map = {
+                    "1": "音樂", "2": "戲劇", "3": "舞蹈", "4": "親子", "5": "戲曲"
+                }
 
-            for item in moc_items:
-                raw_cat = str(item.get("category", "")).strip()
-                cat = moc_cat_map.get(raw_cat, "其他")
-                if cat not in selected_cats and "其他" not in selected_cats:
-                    continue
+                for item in moc_items:
+                    raw_cat = str(item.get("category", "")).strip()
+                    cat = moc_cat_map.get(raw_cat, "其他")
+                    if cat not in selected_cats and "其他" not in selected_cats:
+                        continue
 
-                title = item.get("title", "").strip()
-                if not title: continue
+                    title = item.get("title", "").strip()
+                    if not title: continue
 
-                web_sales = item.get("webSales", "").strip()
-                source_web = item.get("sourceWebPromote", "").strip()
-                link = web_sales if web_sales else (source_web if source_web else "文化部展演專區")
+                    web_sales = item.get("webSales", "").strip()
+                    source_web = item.get("sourceWebPromote", "").strip()
+                    link = web_sales if web_sales else (source_web if source_web else "文化部展演專區")
 
-                channel = "文化部整合"
-                if "opentix" in link.lower(): channel = "OPENTIX"
-                elif "udn" in link.lower(): channel = "UDN售票網"
-                elif "kham" in link.lower(): channel = "寬宏售票"
-                elif "era" in link.lower() or "ticket.com.tw" in link.lower(): channel = "年代售票"
-                elif "kktix" in link.lower(): channel = "KKTIX"
+                    channel = "文化部整合"
+                    if "opentix" in link.lower(): channel = "OPENTIX"
+                    elif "udn" in link.lower(): channel = "UDN售票網"
+                    elif "kham" in link.lower(): channel = "寬宏售票"
+                    elif "era" in link.lower() or "ticket.com.tw" in link.lower(): channel = "年代售票"
+                    elif "kktix" in link.lower(): channel = "KKTIX"
 
-                fest = extract_festival(title, item.get("descriptionFilterHtml", ""), custom_fest_list)
-                performer = extract_performer(title)
+                    fest = extract_festival(title, item.get("descriptionFilterHtml", ""), custom_fest_list)
+                    performer = extract_performer(title)
 
-                show_infos = item.get("showInfo", [])
-                if show_infos:
-                    for s in show_infos:
-                        time_str = s.get("time", "").strip()
-                        location = s.get("locationName", "").strip() or s.get("location", "").strip() or "全台"
+                    show_infos = item.get("showInfo", [])
+                    if show_infos:
+                        for s in show_infos:
+                            time_str = s.get("time", "").strip()
+                            location = s.get("locationName", "").strip() or s.get("location", "").strip() or "全台"
 
-                        # 篩選演出日期區間
-                        m_dt = re.search(r"(\d{4})[./-](\d{1,2})[./-](\d{1,2})", time_str)
-                        if m_dt:
-                            try:
-                                d_val = datetime.date(int(m_dt.group(1)), int(m_dt.group(2)), int(m_dt.group(3)))
-                                if not (start_date <= d_val <= end_date):
-                                    continue
-                            except Exception: pass
+                            m_dt = re.search(r"(\d{4})[./-](\d{1,2})[./-](\d{1,2})", time_str)
+                            if m_dt:
+                                try:
+                                    d_val = datetime.date(int(m_dt.group(1)), int(m_dt.group(2)), int(m_dt.group(3)))
+                                    if not (start_date <= d_val <= end_date):
+                                        continue
+                                except Exception: pass
 
+                            detail_records.append({
+                                "售票通路": channel,
+                                "所屬藝術節/系列": fest,
+                                "節目分類": cat,
+                                "演出單位": performer,
+                                "節目名稱": title,
+                                "演出場次時間": time_str if time_str else "即期 (詳見售票頁)",
+                                "演出地點": location,
+                                "售票狀況/連結": link
+                            })
+                    else:
                         detail_records.append({
                             "售票通路": channel,
                             "所屬藝術節/系列": fest,
                             "節目分類": cat,
                             "演出單位": performer,
                             "節目名稱": title,
-                            "演出場次時間": time_str if time_str else "即期 (詳見售票頁)",
-                            "演出地點": location,
+                            "演出場次時間": item.get("startDate", "即期"),
+                            "演出地點": "全台巡演",
                             "售票狀況/連結": link
                         })
-                else:
-                    detail_records.append({
-                        "售票通路": channel,
-                        "所屬藝術節/系列": fest,
-                        "節目分類": cat,
-                        "演出單位": performer,
-                        "節目名稱": title,
-                        "演出場次時間": item.get("startDate", "即期"),
-                        "演出地點": "全台巡演",
-                        "售票狀況/連結": link
-                    })
 
         elif target_platform == "OPENTIX":
             programs = fetch_opentix()
