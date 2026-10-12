@@ -9,6 +9,10 @@ import io
 import re
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
+import urllib3
+
+# 關閉 SSL 不安全連線警告
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 st.set_page_config(page_title="表演藝術演出節目統計系統", page_icon="🎭", layout="wide")
 
@@ -22,7 +26,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.markdown('<div class="main-title">🎭 表演藝術與展演售票節目統計系統</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-title">支援文化部大盤資料庫、OPENTIX、UDN、寬宏、年代、ACCUPASS 售票節目統計</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-title">支援文化部全國藝文資料庫、OPENTIX、UDN、寬宏、年代、ACCUPASS 售票節目統計</div>', unsafe_allow_html=True)
 
 PLATFORM_OPTIONS = {
     "🏛️ 文化部全國藝文資料庫 (全台跨平台)": "MOC",
@@ -107,9 +111,14 @@ def extract_performer(show_title):
 
     return "詳見售票頁"
 
+# 側邊欄控制項
 with st.sidebar:
     st.header("⚙️ 統計篩選條件")
-    selected_platform_label = st.selectbox("1. 選擇資料來源 / 售票平台：", options=list(PLATFORM_OPTIONS.keys()), index=0)
+    selected_platform_label = st.selectbox(
+        "1. 選擇資料來源 / 售票平台：",
+        options=list(PLATFORM_OPTIONS.keys()),
+        index=0
+    )
     target_platform = PLATFORM_OPTIONS[selected_platform_label]
 
     selected_cats = st.multiselect(
@@ -124,12 +133,12 @@ with st.sidebar:
     st.write("3. 演出日期區間：")
     c1, c2 = st.columns(2)
     with c1:
-        start_date = st.date_input("開始日期", today)
+        start_date = st.date_input("開始日期", today, key="filter_start_date")
     with c2:
-        end_date = st.date_input("結束日期", default_end)
+        end_date = st.date_input("結束日期", default_end, key="filter_end_date")
 
     st.write("4. 補充藝術節/季關鍵字 (選填)：")
-    custom_festivals_input = st.text_input("以逗號分隔，如：Sound Wave, 某某祭", "")
+    custom_festivals_input = st.text_input("以逗號分隔，如：Sound Wave, 某某祭", "", key="filter_fest_kw")
     custom_fest_list = [k.strip() for k in custom_festivals_input.split(",") if k.strip()]
 
     start_btn = st.button("🚀 開始擷取並產生統計", type="primary", use_container_width=True)
@@ -139,8 +148,9 @@ with st.sidebar:
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_moc():
     api_url = "https://cloud.culture.tw/frontsite/trans/SearchShowAction.do?method=doFindTypeJ"
-    headers = {"User-Agent": "Mozilla/5.0"}
-    r = requests.get(api_url, headers=headers, timeout=20)
+    headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"}
+    # 加上 verify=False 解決政府伺服器憑證問題
+    r = requests.get(api_url, headers=headers, timeout=25, verify=False)
     if r.status_code == 200:
         return r.json()
     return []
