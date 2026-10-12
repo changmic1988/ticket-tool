@@ -9,6 +9,14 @@ import io
 import re
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
+import xml.etree.ElementTree as ET
+
+# 嘗試載入 curl_cffi 以模擬瀏覽器 TLS 指紋
+try:
+    from curl_cffi import requests as cureq
+    HAS_CURL_CFFI = True
+except ImportError:
+    HAS_CURL_CFFI = False
 
 st.set_page_config(page_title="表演藝術演出節目統計系統", page_icon="🎭", layout="wide")
 
@@ -134,8 +142,71 @@ with st.sidebar:
 
     start_btn = st.button("🚀 開始擷取並產生統計", type="primary", use_container_width=True)
 
-# ----------------- 售票平台擷取邏輯 -----------------
+# ----------------- KKTIX 穿透解析 -----------------
+@st.cache_data(ttl=1800, show_spinner=False)
+def fetch_kktix_atom():
+    records = []
+    xml_content = None
+    url = "https://kktix.com/events.atom"
 
+    # 1. 優先使用 curl_cffi 模擬真實 Chrome 繞過 Cloudflare
+    if HAS_CURL_CFFI:
+        try:
+            r = cureq.get(url, impersonate="chrome120", timeout=12)
+            if r.status_code == 200:
+                xml_content = r.content
+        except Exception:
+            pass
+
+    # 2. 備用方案
+    if not xml_content:
+        headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"}
+        try:
+            r = requests.get(url, headers=headers, timeout=10)
+            if r.status_code == 200:
+                xml_content = r.content
+        except Exception:
+            pass
+
+    if xml_content:
+        try:
+            root = ET.fromstring(xml_content)
+            ns = {'atom': 'http://www.w3.org/2005/Atom'}
+            for entry in root.findall('atom:entry', ns):
+                t_elem = entry.find('atom:title', ns)
+                l_elem = entry.find('atom:link', ns)
+                p_elem = entry.find('atom:published', ns)
+
+                title = t_elem.text.strip() if t_elem is not None and t_elem.text else ""
+                link = l_elem.attrib.get('href', '') if l_elem is not None else ""
+                
+                date_str = "即期 (詳見售票頁)"
+                if p_elem is not None and p_elem.text:
+                    try:
+                        raw_dt = p_elem.text
+                        date_str = raw_dt[:10]
+                    except Exception:
+                        pass
+
+                cat = "其他"
+                if any(w in title for w in ["劇", "戲曲", "喜劇", "脫口秀"]): cat = "戲劇"
+                elif any(w in title for w in ["音樂", "演唱會", "樂團", "LIVE"]): cat = "音樂"
+                elif any(w in title for w in ["舞", "芭蕾"]): cat = "舞蹈"
+
+                if title:
+                    records.append({
+                        "售票通路": "KKTIX",
+                        "節目分類": cat,
+                        "節目名稱": title,
+                        "演出場次時間": date_str,
+                        "演出地點": "詳見售票頁",
+                        "售票狀況/連結": link
+                    })
+        except Exception:
+            pass
+    return records
+
+# ----------------- OPENTIX 直連 -----------------
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_opentix():
     api_url = "https://csm.api.opentix.life/programs"
@@ -152,6 +223,7 @@ def fetch_opentix():
         except Exception: break
     return all_programs
 
+# ----------------- UDN 直連 -----------------
 def fetch_udn(selected_categories):
     udn_records = []
     base_url = "https://tickets.udnfunlife.com"
@@ -182,6 +254,7 @@ def fetch_udn(selected_categories):
             except Exception: pass
     return udn_records
 
+# ----------------- 寬宏直連 -----------------
 def fetch_kham():
     records = []
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -209,6 +282,7 @@ def fetch_kham():
         except Exception: pass
     return records
 
+# ----------------- 年代直連 -----------------
 def fetch_era():
     records = []
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -239,61 +313,7 @@ def fetch_era():
         except Exception: pass
     return records
 
-@st.cache_data(ttl=1800, show_spinner=False)
-def fetch_kktix_shows():
-    """透過大盤資料庫篩選 KKTIX 售票節目，避開 Cloudflare 403 阻擋"""
-    records = []
-    api_url = "https://cloud.culture.tw/frontsite/trans/SearchShowAction.do?method=doFindTypeJ"
-    headers = {"User-Agent": "Mozilla/5.0"}
-    try:
-        r = requests.get(api_url, headers=headers, timeout=15)
-        if r.status_code == 200:
-            data = r.json()
-            for item in data:
-                web_sales = item.get("webSales", "")
-                source_web = item.get("sourceWebPromote", "")
-                # 判定是否為 KKTIX 通路
-                if "kktix" in web_sales.lower() or "kktix" in source_web.lower():
-                    title = item.get("title", "").strip()
-                    link = web_sales if "kktix" in web_sales.lower() else source_web
-                    cat_val = item.get("category", "")
-                    
-                    cat = "其他"
-                    if cat_val in ["1", "音樂"]: cat = "音樂"
-                    elif cat_val in ["2", "戲劇"]: cat = "戲劇"
-                    elif cat_val in ["3", "舞蹈"]: cat = "舞蹈"
-                    elif cat_val in ["4", "親子"]: cat = "親子"
-                    elif cat_val in ["5", "戲曲"]: cat = "戲曲"
-
-                    show_infos = item.get("showInfo", [])
-                    if show_infos:
-                        for s in show_infos:
-                            time_str = s.get("time", "")
-                            location = s.get("locationName", "") or s.get("location", "") or "詳見售票頁"
-                            records.append({
-                                "售票通路": "KKTIX",
-                                "節目分類": cat,
-                                "節目名稱": title,
-                                "演出場次時間": time_str if time_str else "即期 (詳見售票頁)",
-                                "演出地點": location,
-                                "售票狀況/連結": link if link else "https://kktix.com"
-                            })
-                    else:
-                        start_time = item.get("startDate", "即期")
-                        records.append({
-                            "售票通路": "KKTIX",
-                            "節目分類": cat,
-                            "節目名稱": title,
-                            "演出場次時間": start_time,
-                            "演出地點": "全台巡演",
-                            "售票狀況/連結": link if link else "https://kktix.com"
-                        })
-    except Exception:
-        pass
-    return records
-
 # ----------------- 執行流程 -----------------
-
 if start_btn:
     if not selected_cats:
         st.warning("⚠️ 請至少勾選一種節目種類！")
@@ -307,7 +327,7 @@ if start_btn:
         status_box.info(f"正在連線【{selected_platform_label}】即時擷取資料...")
 
         if target_platform == "KKTIX":
-            shows = fetch_kktix_shows()
+            shows = fetch_kktix_atom()
             pbar.progress(60)
             for s in shows:
                 if s["節目分類"] in selected_cats or "其他" in selected_cats:
