@@ -9,14 +9,6 @@ import io
 import re
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
-import xml.etree.ElementTree as ET
-
-# 嘗試載入 curl_cffi 以模擬瀏覽器 TLS 指紋
-try:
-    from curl_cffi import requests as cureq
-    HAS_CURL_CFFI = True
-except ImportError:
-    HAS_CURL_CFFI = False
 
 st.set_page_config(page_title="表演藝術演出節目統計系統", page_icon="🎭", layout="wide")
 
@@ -30,12 +22,12 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.markdown('<div class="main-title">🎭 表演藝術與展演售票節目統計系統</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-title">完整支援 OPENTIX、UDN、寬宏、年代、KKTIX、ACCUPASS 售票節目統計</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-title">支援文化部大盤資料庫、OPENTIX、UDN、寬宏、年代、ACCUPASS 售票節目統計</div>', unsafe_allow_html=True)
 
 PLATFORM_OPTIONS = {
+    "🏛️ 文化部全國藝文資料庫 (全台跨平台)": "MOC",
     "🎟️ OPENTIX (官網直連)": "OPENTIX",
     "🎪 udn 售票網 (官網直連)": "UDN",
-    "⚡ KKTIX (活動通道)": "KKTIX",
     "🎸 寬宏售票 KHAM (官網直連)": "KHAM",
     "🎟️ 年代售票 ERA (官網直連)": "ERA",
     "🎫 ACCUPASS (活動通專屬)": "ACCUPASS"
@@ -117,13 +109,13 @@ def extract_performer(show_title):
 
 with st.sidebar:
     st.header("⚙️ 統計篩選條件")
-    selected_platform_label = st.selectbox("1. 選擇售票平台：", options=list(PLATFORM_OPTIONS.keys()), index=2)
+    selected_platform_label = st.selectbox("1. 選擇資料來源 / 售票平台：", options=list(PLATFORM_OPTIONS.keys()), index=0)
     target_platform = PLATFORM_OPTIONS[selected_platform_label]
 
     selected_cats = st.multiselect(
         "2. 選擇節目種類：",
         options=["戲劇", "音樂", "舞蹈", "親子", "戲曲", "其他"],
-        default=["戲劇", "音樂", "舞蹈", "親子", "其他"]
+        default=["戲劇", "音樂", "舞蹈", "親子"]
     )
 
     today = datetime.date.today()
@@ -142,71 +134,17 @@ with st.sidebar:
 
     start_btn = st.button("🚀 開始擷取並產生統計", type="primary", use_container_width=True)
 
-# ----------------- KKTIX 穿透解析 -----------------
-@st.cache_data(ttl=1800, show_spinner=False)
-def fetch_kktix_atom():
-    records = []
-    xml_content = None
-    url = "https://kktix.com/events.atom"
+# ----------------- 資料來源擷取模組 -----------------
 
-    # 1. 優先使用 curl_cffi 模擬真實 Chrome 繞過 Cloudflare
-    if HAS_CURL_CFFI:
-        try:
-            r = cureq.get(url, impersonate="chrome120", timeout=12)
-            if r.status_code == 200:
-                xml_content = r.content
-        except Exception:
-            pass
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_moc():
+    api_url = "https://cloud.culture.tw/frontsite/trans/SearchShowAction.do?method=doFindTypeJ"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    r = requests.get(api_url, headers=headers, timeout=20)
+    if r.status_code == 200:
+        return r.json()
+    return []
 
-    # 2. 備用方案
-    if not xml_content:
-        headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"}
-        try:
-            r = requests.get(url, headers=headers, timeout=10)
-            if r.status_code == 200:
-                xml_content = r.content
-        except Exception:
-            pass
-
-    if xml_content:
-        try:
-            root = ET.fromstring(xml_content)
-            ns = {'atom': 'http://www.w3.org/2005/Atom'}
-            for entry in root.findall('atom:entry', ns):
-                t_elem = entry.find('atom:title', ns)
-                l_elem = entry.find('atom:link', ns)
-                p_elem = entry.find('atom:published', ns)
-
-                title = t_elem.text.strip() if t_elem is not None and t_elem.text else ""
-                link = l_elem.attrib.get('href', '') if l_elem is not None else ""
-                
-                date_str = "即期 (詳見售票頁)"
-                if p_elem is not None and p_elem.text:
-                    try:
-                        raw_dt = p_elem.text
-                        date_str = raw_dt[:10]
-                    except Exception:
-                        pass
-
-                cat = "其他"
-                if any(w in title for w in ["劇", "戲曲", "喜劇", "脫口秀"]): cat = "戲劇"
-                elif any(w in title for w in ["音樂", "演唱會", "樂團", "LIVE"]): cat = "音樂"
-                elif any(w in title for w in ["舞", "芭蕾"]): cat = "舞蹈"
-
-                if title:
-                    records.append({
-                        "售票通路": "KKTIX",
-                        "節目分類": cat,
-                        "節目名稱": title,
-                        "演出場次時間": date_str,
-                        "演出地點": "詳見售票頁",
-                        "售票狀況/連結": link
-                    })
-        except Exception:
-            pass
-    return records
-
-# ----------------- OPENTIX 直連 -----------------
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_opentix():
     api_url = "https://csm.api.opentix.life/programs"
@@ -223,7 +161,6 @@ def fetch_opentix():
         except Exception: break
     return all_programs
 
-# ----------------- UDN 直連 -----------------
 def fetch_udn(selected_categories):
     udn_records = []
     base_url = "https://tickets.udnfunlife.com"
@@ -254,7 +191,6 @@ def fetch_udn(selected_categories):
             except Exception: pass
     return udn_records
 
-# ----------------- 寬宏直連 -----------------
 def fetch_kham():
     records = []
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -282,7 +218,6 @@ def fetch_kham():
         except Exception: pass
     return records
 
-# ----------------- 年代直連 -----------------
 def fetch_era():
     records = []
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -313,7 +248,8 @@ def fetch_era():
         except Exception: pass
     return records
 
-# ----------------- 執行流程 -----------------
+# ----------------- 主流程 -----------------
+
 if start_btn:
     if not selected_cats:
         st.warning("⚠️ 請至少勾選一種節目種類！")
@@ -326,14 +262,73 @@ if start_btn:
 
         status_box.info(f"正在連線【{selected_platform_label}】即時擷取資料...")
 
-        if target_platform == "KKTIX":
-            shows = fetch_kktix_atom()
-            pbar.progress(60)
-            for s in shows:
-                if s["節目分類"] in selected_cats or "其他" in selected_cats:
-                    s["所屬藝術節/系列"] = extract_festival(s["節目名稱"], "", custom_fest_list)
-                    s["演出單位"] = extract_performer(s["節目名稱"])
-                    detail_records.append(s)
+        if target_platform == "MOC":
+            moc_items = fetch_moc()
+            pbar.progress(50)
+            
+            moc_cat_map = {
+                "1": "音樂", "2": "戲劇", "3": "舞蹈", "4": "親子", "5": "戲曲"
+            }
+
+            for item in moc_items:
+                raw_cat = str(item.get("category", "")).strip()
+                cat = moc_cat_map.get(raw_cat, "其他")
+                if cat not in selected_cats and "其他" not in selected_cats:
+                    continue
+
+                title = item.get("title", "").strip()
+                if not title: continue
+
+                web_sales = item.get("webSales", "").strip()
+                source_web = item.get("sourceWebPromote", "").strip()
+                link = web_sales if web_sales else (source_web if source_web else "文化部展演專區")
+
+                channel = "文化部整合"
+                if "opentix" in link.lower(): channel = "OPENTIX"
+                elif "udn" in link.lower(): channel = "UDN售票網"
+                elif "kham" in link.lower(): channel = "寬宏售票"
+                elif "era" in link.lower() or "ticket.com.tw" in link.lower(): channel = "年代售票"
+                elif "kktix" in link.lower(): channel = "KKTIX"
+
+                fest = extract_festival(title, item.get("descriptionFilterHtml", ""), custom_fest_list)
+                performer = extract_performer(title)
+
+                show_infos = item.get("showInfo", [])
+                if show_infos:
+                    for s in show_infos:
+                        time_str = s.get("time", "").strip()
+                        location = s.get("locationName", "").strip() or s.get("location", "").strip() or "全台"
+
+                        # 篩選演出日期區間
+                        m_dt = re.search(r"(\d{4})[./-](\d{1,2})[./-](\d{1,2})", time_str)
+                        if m_dt:
+                            try:
+                                d_val = datetime.date(int(m_dt.group(1)), int(m_dt.group(2)), int(m_dt.group(3)))
+                                if not (start_date <= d_val <= end_date):
+                                    continue
+                            except Exception: pass
+
+                        detail_records.append({
+                            "售票通路": channel,
+                            "所屬藝術節/系列": fest,
+                            "節目分類": cat,
+                            "演出單位": performer,
+                            "節目名稱": title,
+                            "演出場次時間": time_str if time_str else "即期 (詳見售票頁)",
+                            "演出地點": location,
+                            "售票狀況/連結": link
+                        })
+                else:
+                    detail_records.append({
+                        "售票通路": channel,
+                        "所屬藝術節/系列": fest,
+                        "節目分類": cat,
+                        "演出單位": performer,
+                        "節目名稱": title,
+                        "演出場次時間": item.get("startDate", "即期"),
+                        "演出地點": "全台巡演",
+                        "售票狀況/連結": link
+                    })
 
         elif target_platform == "OPENTIX":
             programs = fetch_opentix()
@@ -439,7 +434,7 @@ if start_btn:
         if not detail_records:
             status_box.empty()
             pbar.empty()
-            st.warning(f"💡 在所選的【{selected_platform_label}】平台與條件下未找到節目。")
+            st.warning(f"💡 在所選的【{selected_platform_label}】平台與條件下未找到節目。建議放寬日期區間。")
         else:
             df_details = pd.DataFrame(detail_records)
             summary_list = []
