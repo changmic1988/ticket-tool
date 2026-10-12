@@ -123,7 +123,7 @@ with st.sidebar:
     )
 
     today = datetime.date.today()
-    default_end = today + datetime.timedelta(days=120)
+    default_end = today + datetime.timedelta(days=180)
 
     st.write("3. 演出日期區間：")
     c1, c2 = st.columns(2)
@@ -193,34 +193,32 @@ def fetch_udn_shows_direct(selected_categories, pbar, status_box):
         pbar.progress(int((idx + 1) / max(total, 1) * 80))
     return udn_records
 
-@st.cache_data(ttl=1800, show_spinner=False)
 def fetch_opentix_direct():
-    """直接對接 OPENTIX 官方 CSM API 取得全部線上節目"""
     api_url = "https://csm.api.opentix.life/programs"
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
         "Referer": "https://www.opentix.life/"
     }
     all_programs = []
-    page = 1
-    while page <= 10:  # 抓取前 10 頁（約 200~300 檔主要熱門節目）
+    log_info = []
+    for page in range(1, 6):
         try:
-            params = {"page": page, "limit": 30}
-            r = requests.get(api_url, headers=headers, params=params, timeout=15)
+            params = {"page": page, "limit": 20}
+            r = requests.get(api_url, headers=headers, params=params, timeout=12)
+            log_info.append(f"Page {page} 狀態碼: {r.status_code}")
             if r.status_code == 200:
-                data = r.json().get("result", {}).get("data", [])
-                if not data:
+                res = r.json()
+                items = res.get("result", {}).get("data", [])
+                log_info.append(f"Page {page} 筆數: {len(items)}")
+                if not items:
                     break
-                all_programs.extend(data)
-                next_page = r.json().get("result", {}).get("nextPage")
-                if not next_page:
-                    break
-                page += 1
+                all_programs.extend(items)
             else:
                 break
-        except Exception:
+        except Exception as e:
+            log_info.append(f"Page {page} 錯誤: {str(e)}")
             break
-    return all_programs
+    return all_programs, log_info
 
 if start_btn:
     if not selected_cats:
@@ -234,77 +232,72 @@ if start_btn:
 
         if target_platform == "OPENTIX":
             status_box.info("正在連線 OPENTIX 官方伺服器即時擷取在售節目...")
-            programs = fetch_opentix_direct()
-            pbar.progress(40)
+            programs, debug_logs = fetch_opentix_direct()
+            pbar.progress(50)
+
+            # 顯示除錯資訊給使用者看連線狀態
+            with st.expander("🔍 OPENTIX 連線除錯資訊", expanded=(len(programs) == 0)):
+                for log in debug_logs:
+                    st.write(log)
+                st.write(f"總共抓到原始資料：{len(programs)} 筆")
 
             for prog in programs:
                 title = prog.get("name", "").strip()
                 cat = prog.get("displayCategory", "其他")
-                
-                # 類別對應
-                matched_cat = "其他"
-                for c in ["戲劇", "音樂", "舞蹈", "親子", "戲曲"]:
-                    if c in cat:
-                        matched_cat = c
-                        break
-                
-                if matched_cat not in selected_cats and "其他" not in selected_cats:
-                    continue
-
                 prog_id = prog.get("id", "")
                 link = f"https://www.opentix.life/event/{prog_id}" if prog_id else "https://www.opentix.life"
-                cities = "、".join(prog.get("cities", [])) if prog.get("cities") else "全台巡演"
+                cities = "、".join(prog.get("cities", [])) if prog.get("cities") else "全台"
                 fest = extract_festival(title, "", custom_fest_list)
                 performer = extract_performer(title)
 
+                # 轉換時間戳
+                s_ts = prog.get("startDateTime")
+                e_ts = prog.get("endDateTime")
+                time_str = "即期 (詳見售票頁)"
+                
+                # 如果時間戳是秒級別或毫秒級別
+                if s_ts:
+                    try:
+                        ts_val = s_ts / 1000 if s_ts > 10000000000 else s_ts
+                        s_dt = datetime.datetime.fromtimestamp(ts_val).date()
+                        time_str = s_dt.strftime("%Y-%m-%d")
+                    except Exception:
+                        pass
+
                 events = prog.get("events", [])
-                if not events:
-                    # 無場次時以節目開始/結束時間為準
-                    s_ts = prog.get("startDateTime")
-                    e_ts = prog.get("endDateTime")
-                    time_str = "即期 (詳見售票頁)"
-                    if s_ts:
-                        try:
-                            s_dt = datetime.datetime.fromtimestamp(s_ts / 1000).date()
-                            if not (start_date <= s_dt <= end_date):
-                                continue
-                            time_str = s_dt.strftime("%Y-%m-%d")
-                        except Exception:
-                            pass
+                if events:
+                    for ev in events:
+                        ev_start = ev.get("startDateTime")
+                        ev_str = time_str
+                        if ev_start:
+                            try:
+                                ts_v = ev_start / 1000 if ev_start > 10000000000 else ev_start
+                                ev_dt = datetime.datetime.fromtimestamp(ts_v)
+                                ev_str = ev_dt.strftime("%Y-%m-%d %H:%M")
+                            except Exception:
+                                pass
+
+                        detail_records.append({
+                            "售票通路": "OPENTIX",
+                            "所屬藝術節/系列": fest,
+                            "節目分類": cat,
+                            "演出單位": performer,
+                            "節目名稱": title,
+                            "演出場次時間": ev_str,
+                            "演出地點": cities,
+                            "售票狀況/連結": link
+                        })
+                else:
                     detail_records.append({
                         "售票通路": "OPENTIX",
                         "所屬藝術節/系列": fest,
-                        "節目分類": matched_cat,
+                        "節目分類": cat,
                         "演出單位": performer,
                         "節目名稱": title,
                         "演出場次時間": time_str,
                         "演出地點": cities,
                         "售票狀況/連結": link
                     })
-                else:
-                    for ev in events:
-                        ev_start = ev.get("startDateTime")
-                        if ev_start:
-                            try:
-                                dt = datetime.datetime.fromtimestamp(ev_start / 1000)
-                                if not (start_date <= dt.date() <= end_date):
-                                    continue
-                                time_str = dt.strftime("%Y-%m-%d %H:%M")
-                            except Exception:
-                                time_str = "詳見售票頁"
-                        else:
-                            time_str = "詳見售票頁"
-
-                        detail_records.append({
-                            "售票通路": "OPENTIX",
-                            "所屬藝術節/系列": fest,
-                            "節目分類": matched_cat,
-                            "演出單位": performer,
-                            "節目名稱": title,
-                            "演出場次時間": time_str,
-                            "演出地點": cities,
-                            "售票狀況/連結": link
-                        })
 
         elif target_platform == "UDN":
             status_box.info("正在連線 UDN 售票網官網即時擷取演出節目...")
@@ -360,7 +353,7 @@ if start_btn:
         if not detail_records:
             status_box.empty()
             pbar.empty()
-            st.warning(f"💡 在所選的【{selected_platform_label}】平台與條件下未找到節目。建議放寬日期區間。")
+            st.warning(f"💡 在所選的【{selected_platform_label}】平台與條件下未找到節目。")
         else:
             df_details = pd.DataFrame(detail_records)
             summary_list = []
