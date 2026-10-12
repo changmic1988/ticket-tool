@@ -7,9 +7,9 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 import io
 import re
-import time
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
+import xml.etree.ElementTree as ET
 
 st.set_page_config(page_title="表演藝術演出節目統計系統", page_icon="🎭", layout="wide")
 
@@ -23,11 +23,14 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.markdown('<div class="main-title">🎭 表演藝術與展演售票節目統計系統</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-title">支援 OPENTIX、UDN 官網雙軌直連、ACCUPASS、智慧藝術節識別與雙分頁 Excel 匯出</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-title">完整支援 OPENTIX、UDN、寬宏、年代、KKTIX、ACCUPASS 官網直連統計</div>', unsafe_allow_html=True)
 
 PLATFORM_OPTIONS = {
     "🎟️ OPENTIX (官網直連)": "OPENTIX",
     "🎪 udn 售票網 (官網直連)": "UDN",
+    "🎸 寬宏售票 KHAM (官網直連)": "KHAM",
+    "🎟️ 年代售票 ERA (官網直連)": "ERA",
+    "⚡ KKTIX (活動通道)": "KKTIX",
     "🎫 ACCUPASS (活動通專屬)": "ACCUPASS"
 }
 
@@ -37,11 +40,6 @@ CATEGORY_MAP_UDN = {
     "舞蹈": "100",
     "親子": "129"
 }
-
-ACCUPASS_EXCLUDE_KEYWORDS = [
-    "工作坊", "手作", "市集", "體驗課", "教學", "培訓", "說明會", "品酒",
-    "創業", "行銷", "分享會", "讀書會", "烘焙", "證照", "瑜珈", "運動會", "線上直播", "論壇"
-]
 
 BUILTIN_FESTIVALS = [
     "TIFA", "NTT-TIFA", "KSAF", "TTTF", "Fringe", "藝穗節", "台北藝術節", "臺北藝術節",
@@ -137,83 +135,136 @@ with st.sidebar:
 
     start_btn = st.button("🚀 開始擷取並產生統計", type="primary", use_container_width=True)
 
-def parse_udn_card_text(text):
-    date_match = re.search(r"(\d{4}[./-]\d{1,2}[./-]\d{1,2}(?:\s*~\s*\d{4}[./-]\d{1,2}[./-]\d{1,2})?)", text)
-    date_str = date_match.group(1).strip() if date_match else "即期 (詳見售票頁)"
-    title = text
-    venue = "詳見售票頁"
-    if date_match:
-        idx_start, idx_end = date_match.span()
-        title = text[:idx_start].strip()
-        after_date = text[idx_end:].strip()
-        venue_match = re.split(r"NT\s*\$|NTD|\$", after_date)
-        venue = venue_match[0].replace("...more", "").strip() if venue_match else after_date
-    return title, date_str, venue
+# ----------------- 各平台直連模組 -----------------
 
-def fetch_udn_shows_direct(selected_categories, pbar, status_box):
+@st.cache_data(ttl=1800, show_spinner=False)
+def fetch_opentix():
+    api_url = "https://csm.api.opentix.life/programs"
+    headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://www.opentix.life/"}
+    all_programs = []
+    for page in range(1, 11):
+        try:
+            r = requests.get(api_url, headers=headers, params={"page": page, "limit": 25}, timeout=12)
+            if r.status_code == 200:
+                items = r.json().get("result", {}).get("data", [])
+                if not items: break
+                all_programs.extend(items)
+            else: break
+        except Exception: break
+    return all_programs
+
+def fetch_udn(selected_categories):
     udn_records = []
     base_url = "https://tickets.udnfunlife.com"
-    headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"}
-    target_routes = []
+    headers = {"User-Agent": "Mozilla/5.0"}
     for cat_name in ["戲劇", "音樂", "舞蹈", "親子"]:
         if cat_name in selected_categories:
             cat_id = CATEGORY_MAP_UDN[cat_name]
             url = f"https://tickets.udnfunlife.com/application/UTK01/UTK0101_03.aspx?Category={cat_id}&kdid=cateList"
-            target_routes.append((url, cat_name))
-
-    total = len(target_routes)
-    for idx, (url, cat_name) in enumerate(target_routes):
-        status_box.info(f"正在擷取 UDN【{cat_name}】專區在售節目...")
-        try:
-            r = requests.get(url, headers=headers, timeout=15)
-            if r.status_code == 200:
-                soup = BeautifulSoup(r.text, "lxml")
-                a_tags = soup.find_all("a", href=re.compile(r"PRODUCT_ID="))
-                seen_links = set()
-                for a in a_tags:
-                    href = a.get("href", "")
-                    full_link = urljoin(base_url, href)
-                    if full_link in seen_links: continue
-                    seen_links.add(full_link)
-                    raw_text = a.get_text(" ", strip=True)
-                    if not raw_text or len(raw_text) < 4: continue
-                    title, date_str, venue = parse_udn_card_text(raw_text)
-                    if not title or len(title) < 2: continue
-
-                    udn_records.append({
-                        "title": title,
-                        "category": cat_name,
-                        "date_str": date_str,
-                        "venue": venue if venue else "詳見售票頁",
-                        "link": full_link
-                    })
-        except Exception:
-            pass
-        pbar.progress(int((idx + 1) / max(total, 1) * 80))
+            try:
+                r = requests.get(url, headers=headers, timeout=12)
+                if r.status_code == 200:
+                    soup = BeautifulSoup(r.text, "lxml")
+                    for a in soup.find_all("a", href=re.compile(r"PRODUCT_ID=")):
+                        full_link = urljoin(base_url, a.get("href", ""))
+                        raw_text = a.get_text(" ", strip=True)
+                        if len(raw_text) < 4: continue
+                        date_match = re.search(r"(\d{4}[./-]\d{1,2}[./-]\d{1,2}(?:\s*~\s*\d{4}[./-]\d{1,2}[./-]\d{1,2})?)", raw_text)
+                        date_str = date_match.group(1).strip() if date_match else "即期 (詳見售票頁)"
+                        title = raw_text[:date_match.span()[0]].strip() if date_match else raw_text
+                        udn_records.append({
+                            "售票通路": "UDN 售票網",
+                            "節目分類": cat_name,
+                            "節目名稱": title,
+                            "演出場次時間": date_str,
+                            "演出地點": "詳見售票頁",
+                            "售票狀況/連結": full_link
+                        })
+            except Exception: pass
     return udn_records
 
-@st.cache_data(ttl=1800, show_spinner=False)
-def fetch_opentix_direct():
-    api_url = "https://csm.api.opentix.life/programs"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
-        "Referer": "https://www.opentix.life/"
-    }
-    all_programs = []
-    for page in range(1, 11):
+def fetch_kham():
+    records = []
+    headers = {"User-Agent": "Mozilla/5.0"}
+    urls = [
+        ("https://kham.com.tw/application/UTK01/UTK0101_06.aspx?TYPE=1&CATEGORY=205", "音樂/戲劇"),
+        ("https://kham.com.tw/application/UTK01/UTK0101_06.aspx?TYPE=1&CATEGORY=80", "藝文展演")
+    ]
+    for url, cat in urls:
         try:
-            params = {"page": page, "limit": 25}
-            r = requests.get(api_url, headers=headers, params=params, timeout=12)
+            r = requests.get(url, headers=headers, timeout=12)
             if r.status_code == 200:
-                items = r.json().get("result", {}).get("data", [])
-                if not items:
-                    break
-                all_programs.extend(items)
-            else:
-                break
-        except Exception:
-            break
-    return all_programs
+                soup = BeautifulSoup(r.text, "html.parser")
+                for a in soup.find_all("a", href=re.compile(r"PRODUCT_ID=")):
+                    title = a.get_text(" ", strip=True)
+                    if len(title) < 2: continue
+                    link = urljoin("https://kham.com.tw/application/UTK01/", a.get("href", ""))
+                    records.append({
+                        "售票通路": "寬宏售票",
+                        "節目分類": "音樂" if "音樂" in cat else "戲劇",
+                        "節目名稱": title,
+                        "演出場次時間": "即期 (詳見售票頁)",
+                        "演出地點": "全台巡演",
+                        "售票狀況/連結": link
+                    })
+        except Exception: pass
+    return records
+
+def fetch_era():
+    records = []
+    headers = {"User-Agent": "Mozilla/5.0"}
+    urls = [
+        "https://ticket.com.tw/application/UTK01/UTK0101_.aspx",
+        "https://ticket.com.tw/application/UTK02/UTK0201_01.aspx?CATEGORY=1"
+    ]
+    for url in urls:
+        try:
+            r = requests.get(url, headers=headers, timeout=12)
+            if r.status_code == 200:
+                soup = BeautifulSoup(r.text, "html.parser")
+                for a in soup.find_all("a", href=re.compile(r"PRODUCT_ID=")):
+                    title = a.get("title", "") or a.get_text(" ", strip=True)
+                    if not title or len(title) < 2:
+                        img = a.find("img")
+                        if img and img.get("alt"): title = img.get("alt").strip()
+                    if len(title) < 2: continue
+                    link = urljoin("https://ticket.com.tw/application/UTK01/", a.get("href", ""))
+                    records.append({
+                        "售票通路": "年代售票",
+                        "節目分類": "戲劇",
+                        "節目名稱": title,
+                        "演出場次時間": "即期 (詳見售票頁)",
+                        "演出地點": "全台巡演",
+                        "售票狀況/連結": link
+                    })
+        except Exception: pass
+    return records
+
+def fetch_kktix():
+    records = []
+    headers = {"User-Agent": "Mozilla/5.0"}
+    try:
+        r = requests.get("https://kktix.com/events.atom", headers=headers, timeout=12)
+        if r.status_code == 200:
+            root = ET.fromstring(r.content)
+            for entry in root.findall("{http://www.w3.org/2005/Atom}entry"):
+                title = entry.find("{http://www.w3.org/2005/Atom}title").text or ""
+                link_el = entry.find("{http://www.w3.org/2005/Atom}link")
+                link = link_el.attrib.get("href", "") if link_el is not None else ""
+                published = entry.find("{http://www.w3.org/2005/Atom}published")
+                date_str = published.text[:10] if published is not None and published.text else "即期"
+                records.append({
+                    "售票通路": "KKTIX",
+                    "節目分類": "其他",
+                    "節目名稱": title.strip(),
+                    "演出場次時間": date_str,
+                    "演出地點": "詳見售票頁",
+                    "售票狀況/連結": link
+                })
+    except Exception: pass
+    return records
+
+# ----------------- 執行流程 -----------------
 
 if start_btn:
     if not selected_cats:
@@ -225,21 +276,19 @@ if start_btn:
         pbar = st.progress(0)
         detail_records = []
 
-        if target_platform == "OPENTIX":
-            status_box.info("正在連線 OPENTIX 官方伺服器即時擷取在售節目...")
-            programs = fetch_opentix_direct()
-            pbar.progress(50)
+        status_box.info(f"正在連線【{selected_platform_label}】官網即時擷取資料...")
 
+        if target_platform == "OPENTIX":
+            programs = fetch_opentix()
+            pbar.progress(50)
             for prog in programs:
                 title = prog.get("name", "").strip()
                 cat = prog.get("displayCategory", "其他")
-                
                 matched_cat = "其他"
                 for c in ["戲劇", "音樂", "舞蹈", "親子", "戲曲"]:
                     if c in cat:
                         matched_cat = c
                         break
-                
                 if matched_cat not in selected_cats and "其他" not in selected_cats:
                     continue
 
@@ -248,7 +297,6 @@ if start_btn:
                 cities = "、".join(prog.get("cities", [])) if prog.get("cities") else "全台巡演"
                 fest = extract_festival(title, "", custom_fest_list)
                 performer = extract_performer(title)
-
                 events = prog.get("events", [])
                 if events:
                     for ev in events:
@@ -258,12 +306,9 @@ if start_btn:
                             try:
                                 ts_v = ev_start / 1000 if ev_start > 10000000000 else ev_start
                                 ev_dt = datetime.datetime.fromtimestamp(ts_v)
-                                if not (start_date <= ev_dt.date() <= end_date):
-                                    continue
+                                if not (start_date <= ev_dt.date() <= end_date): continue
                                 ev_str = ev_dt.strftime("%Y-%m-%d %H:%M")
-                            except Exception:
-                                pass
-
+                            except Exception: pass
                         detail_records.append({
                             "售票通路": "OPENTIX",
                             "所屬藝術節/系列": fest,
@@ -287,60 +332,65 @@ if start_btn:
                     })
 
         elif target_platform == "UDN":
-            status_box.info("正在連線 UDN 售票網官網即時擷取演出節目...")
-            shows = fetch_udn_shows_direct(selected_cats, pbar, status_box)
+            shows = fetch_udn(selected_cats)
+            pbar.progress(60)
             for s in shows:
-                title = s["title"]
-                cat = s["category"]
-                link = s["link"]
-                date_str = s["date_str"]
-                venue = s["venue"]
-                fest = extract_festival(title, "", custom_fest_list)
-                performer = extract_performer(title)
+                s["所屬藝術節/系列"] = extract_festival(s["節目名稱"], "", custom_fest_list)
+                s["演出單位"] = extract_performer(s["節目名稱"])
+                detail_records.append(s)
 
-                detail_records.append({
-                    "售票通路": "UDN 售票網",
-                    "所屬藝術節/系列": fest,
-                    "節目分類": cat,
-                    "演出單位": performer,
-                    "節目名稱": title,
-                    "演出場次時間": date_str,
-                    "演出地點": venue,
-                    "售票狀況/連結": link
-                })
+        elif target_platform == "KHAM":
+            shows = fetch_kham()
+            pbar.progress(60)
+            for s in shows:
+                s["所屬藝術節/系列"] = extract_festival(s["節目名稱"], "", custom_fest_list)
+                s["演出單位"] = extract_performer(s["節目名稱"])
+                detail_records.append(s)
+
+        elif target_platform == "ERA":
+            shows = fetch_era()
+            pbar.progress(60)
+            for s in shows:
+                s["所屬藝術節/系列"] = extract_festival(s["節目名稱"], "", custom_fest_list)
+                s["演出單位"] = extract_performer(s["節目名稱"])
+                detail_records.append(s)
+
+        elif target_platform == "KKTIX":
+            shows = fetch_kktix()
+            pbar.progress(60)
+            for s in shows:
+                s["所屬藝術節/系列"] = extract_festival(s["節目名稱"], "", custom_fest_list)
+                s["演出單位"] = extract_performer(s["節目名稱"])
+                detail_records.append(s)
 
         elif target_platform == "ACCUPASS":
-            status_box.info("正在連線 ACCUPASS 專屬活動通道並進行表演除噪...")
-            headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)", "Referer": "https://www.accupass.com/"}
-            for kw in ["戲劇", "音樂", "演出", "脫口秀", "讀劇", "喜劇", "漫才", "沉浸式", "舞蹈"]:
+            headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://www.accupass.com/"}
+            for kw in ["戲劇", "音樂", "演出", "脫口秀", "舞蹈"]:
                 try:
-                    url = f"https://api.accupass.com/v3/search/events?keyword={kw}&page=0&size=25"
-                    r = requests.get(url, headers=headers, timeout=10)
+                    url = f"https://api.accupass.com/v3/search/events?keyword={kw}&page=0&size=20"
+                    r = requests.get(url, headers=headers, timeout=8)
                     if r.status_code == 200:
                         for ev in r.json().get("events", []):
-                            title = ev.get("title", "").strip()
-                            if any(ex in title for ex in ACCUPASS_EXCLUDE_KEYWORDS): continue
-                            event_id = ev.get("eventId", "")
+                            t = ev.get("title", "").strip()
                             detail_records.append({
                                 "售票通路": "ACCUPASS",
-                                "所屬藝術節/系列": extract_festival(title, "", custom_fest_list),
+                                "所屬藝術節/系列": extract_festival(t, "", custom_fest_list),
                                 "節目分類": "其他",
-                                "演出單位": ev.get("orgName", "ACCUPASS 主辦單位"),
-                                "節目名稱": title,
+                                "演出單位": ev.get("orgName", "主辦單位"),
+                                "節目名稱": t,
                                 "演出場次時間": ev.get("eventStartDateTime", "詳見售票頁"),
-                                "演出地點": ev.get("address", "") or ev.get("location", "詳見活動頁面"),
-                                "售票狀況/連結": f"https://www.accupass.com/event/{event_id}" if event_id else "https://www.accupass.com"
+                                "演出地點": ev.get("address", "") or "詳見活動頁",
+                                "售票狀況/連結": f"https://www.accupass.com/event/{ev.get('eventId', '')}"
                             })
-                except Exception:
-                    pass
-            pbar.progress(70)
+                except Exception: pass
+            pbar.progress(60)
 
         pbar.progress(85)
 
         if not detail_records:
             status_box.empty()
             pbar.empty()
-            st.warning(f"💡 在所選的【{selected_platform_label}】平台與條件下未找到符合條件的節目。建議放寬日期區間。")
+            st.warning(f"💡 在所選的【{selected_platform_label}】平台與條件下未找到節目。")
         else:
             df_details = pd.DataFrame(detail_records)
             summary_list = []
