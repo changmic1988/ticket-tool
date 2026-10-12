@@ -4,4 +4,3 @@ pandas
 openpyxl
 beautifulsoup4
 lxml
-curl_cffi
