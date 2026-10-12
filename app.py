@@ -157,7 +157,6 @@ def identify_platform_deep(web_sales_url, desc="", title="", comment=""):
         return "ACCUPASS"
     return "其他售票通路"
 
-# 側邊欄控制項
 with st.sidebar:
     st.header("⚙️ 統計篩選條件")
     selected_platform_label = st.selectbox("1. 選擇售票平台：", options=list(PLATFORM_OPTIONS.keys()), index=0)
@@ -185,7 +184,6 @@ with st.sidebar:
 
     start_btn = st.button("🚀 開始擷取並產生統計", type="primary", use_container_width=True)
 
-# UDN 專屬字串解析
 def parse_udn_card_text(text):
     date_match = re.search(r"(\d{4}[./-]\d{1,2}[./-]\d{1,2}(?:\s*~\s*\d{4}[./-]\d{1,2}[./-]\d{1,2})?)", text)
     date_str = date_match.group(1).strip() if date_match else "即期 (詳見售票頁)"
@@ -199,11 +197,10 @@ def parse_udn_card_text(text):
         venue = venue_match[0].replace("...more", "").strip() if venue_match else after_date
     return title, date_str, venue
 
-# UDN 爬蟲
 def fetch_udn_shows_direct(selected_categories, pbar, status_box):
     udn_records = []
     base_url = "https://tickets.udnfunlife.com"
-    headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"}
+    headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"}
     target_routes = []
     for cat_name in ["戲劇", "音樂", "舞蹈", "親子"]:
         if cat_name in selected_categories:
@@ -215,7 +212,7 @@ def fetch_udn_shows_direct(selected_categories, pbar, status_box):
     for idx, (url, cat_name) in enumerate(target_routes):
         status_box.info(f"正在擷取 UDN【{cat_name}】專區在售節目...")
         try:
-            r = requests.get(url, headers=headers, timeout=12)
+            r = requests.get(url, headers=headers, timeout=15)
             if r.status_code == 200:
                 soup = BeautifulSoup(r.text, "lxml")
                 a_tags = soup.find_all("a", href=re.compile(r"PRODUCT_ID="))
@@ -242,14 +239,13 @@ def fetch_udn_shows_direct(selected_categories, pbar, status_box):
         pbar.progress(int((idx + 1) / max(total, 1) * 80))
     return udn_records
 
-# ACCUPASS 直連
-def fetch_accupass_shows(start_date, end_date):
+def fetch_accupass_shows():
     accupass_records = []
     headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)", "Referer": "https://www.accupass.com/"}
     for kw in ["戲劇", "音樂", "演出", "脫口秀", "讀劇", "喜劇", "漫才", "沉浸式", "舞蹈"]:
         try:
             url = f"https://api.accupass.com/v3/search/events?keyword={kw}&page=0&size=25"
-            r = requests.get(url, headers=headers, timeout=8)
+            r = requests.get(url, headers=headers, timeout=10)
             if r.status_code == 200:
                 events = r.json().get("events", [])
                 for ev in events:
@@ -274,7 +270,6 @@ def fetch_accupass_shows(start_date, end_date):
             pass
     return accupass_records
 
-# 執行流程
 if start_btn:
     if not selected_cats:
         st.warning("⚠️ 請至少勾選一種節目種類！")
@@ -285,11 +280,9 @@ if start_btn:
         pbar = st.progress(0)
         detail_records = []
 
-        # 分流 1：UDN 官網直連
         if target_platform == "UDN":
             status_box.info("正在連線 UDN 售票網官網即時擷取演出節目...")
             shows = fetch_udn_shows_direct(selected_cats, pbar, status_box)
-
             for s in shows:
                 title = s["title"]
                 cat = s["category"]
@@ -298,9 +291,6 @@ if start_btn:
                 venue = s["venue"]
                 fest = extract_festival(title, "", custom_fest_list)
                 performer = extract_performer(title)
-
-                m_date = re.search(r"(\d{4}[./-]\d{1,2}[./-]\d{1,2})", date_str)
-                first_date = m_date.group(1).replace(".", "-").replace("/", "-") if m_date else "即期"
 
                 detail_records.append({
                     "售票通路": "UDN 售票網",
@@ -313,18 +303,15 @@ if start_btn:
                     "售票狀況/連結": link
                 })
 
-        # 分流 2：ACCUPASS 直連
         elif target_platform == "ACCUPASS":
             status_box.info("正在連線 ACCUPASS 專屬活動通道並進行表演除噪...")
-            shows = fetch_accupass_shows(start_date, end_date)
+            shows = fetch_accupass_shows()
             pbar.progress(70)
-
             for s in shows:
                 title = s["title"]
                 cat = "其他"
                 fest = extract_festival(title, "", custom_fest_list)
                 performer = extract_performer(title, master_unit=s.get("masterUnit", []))
-
                 detail_records.append({
                     "售票通路": "ACCUPASS",
                     "所屬藝術節/系列": fest,
@@ -336,12 +323,10 @@ if start_btn:
                     "售票狀況/連結": s["link"]
                 })
 
-        # 分流 3：文化部全台統整大盤 (OPENTIX / 寬宏 / 年代 / KKTIX / 全部)
         else:
             status_box.info(f"正在連線全國藝文活動資料庫篩選【{selected_platform_label}】節目...")
             API_URL = "https://cloud.culture.tw/frontsite/trans/SearchShowAction.do?method=doFindTypeJ"
             raw_data = []
-
             fetch_categories = set()
             for cat in selected_cats:
                 if cat == "其他":
@@ -351,9 +336,10 @@ if start_btn:
 
             fetch_list = list(fetch_categories)
             total = len(fetch_list)
+            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
             for i, code in enumerate(fetch_list):
                 try:
-                    r = requests.get(API_URL, params={"category": code}, timeout=15)
+                    r = requests.get(API_URL, params={"category": code}, headers=headers, timeout=20)
                     if r.status_code == 200:
                         raw_data.extend(r.json())
                 except Exception:
@@ -373,7 +359,6 @@ if start_btn:
                 web_sales = s.get("webSales", "").strip()
                 comment_text = s.get("comment", "")
 
-                # 平台深度篩選
                 detected_platform = identify_platform_deep(web_sales, desc, title, comment_text)
                 if target_platform != "ALL" and detected_platform != target_platform:
                     continue
@@ -401,9 +386,11 @@ if start_btn:
                     loc_detail = si.get("location", "").strip()
                     floc = f"{loc_name} ({loc_detail})" if (loc_detail and loc_detail != loc_name) else loc_name
 
-                    if len(ptime) >= 10:
+                    # 日期寬鬆過濾：只要有包含日期字串就嘗試比對，格式異常或無日期則保留供檢視
+                    date_match = re.search(r"(\d{4})[./-](\d{1,2})[./-](\d{1,2})", ptime)
+                    if date_match:
                         try:
-                            sdt = datetime.datetime.strptime(ptime[:10].replace("/", "-"), "%Y-%m-%d").date()
+                            sdt = datetime.date(int(date_match.group(1)), int(date_match.group(2)), int(date_match.group(3)))
                             if not (start_date <= sdt <= end_date):
                                 continue
                         except Exception:
@@ -425,10 +412,9 @@ if start_btn:
         if not detail_records:
             status_box.empty()
             pbar.empty()
-            st.warning(f"💡 在所選的【{selected_platform_label}】平台與條件下，未找到符合條件之節目。建議放寬日期區間或節目種類再次查詢。")
+            st.warning(f"💡 在所選的【{selected_platform_label}】平台與條件下未找到節目。建議放寬日期區間或改選「🎪 udn 售票網 (官網直連)」。")
         else:
             df_details = pd.DataFrame(detail_records)
-
             summary_list = []
             grouped = df_details.groupby("節目名稱")
 
@@ -457,7 +443,6 @@ if start_btn:
 
             df_summary = pd.DataFrame(summary_list)
 
-            # 核心排序演算法
             fest_first_dates = {}
             for fest, group in df_summary.groupby("所屬藝術節/系列"):
                 fest_first_dates[fest] = group["首演日期"].min()
