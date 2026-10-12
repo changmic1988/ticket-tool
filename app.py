@@ -110,7 +110,6 @@ def extract_performer(show_title):
 
     return "詳見售票頁"
 
-# 側邊欄
 with st.sidebar:
     st.header("⚙️ 統計篩選條件")
     selected_platform_label = st.selectbox("1. 選擇售票平台：", options=list(PLATFORM_OPTIONS.keys()), index=0)
@@ -193,6 +192,7 @@ def fetch_udn_shows_direct(selected_categories, pbar, status_box):
         pbar.progress(int((idx + 1) / max(total, 1) * 80))
     return udn_records
 
+@st.cache_data(ttl=1800, show_spinner=False)
 def fetch_opentix_direct():
     api_url = "https://csm.api.opentix.life/programs"
     headers = {
@@ -200,25 +200,20 @@ def fetch_opentix_direct():
         "Referer": "https://www.opentix.life/"
     }
     all_programs = []
-    log_info = []
-    for page in range(1, 6):
+    for page in range(1, 11):
         try:
-            params = {"page": page, "limit": 20}
+            params = {"page": page, "limit": 25}
             r = requests.get(api_url, headers=headers, params=params, timeout=12)
-            log_info.append(f"Page {page} 狀態碼: {r.status_code}")
             if r.status_code == 200:
-                res = r.json()
-                items = res.get("result", {}).get("data", [])
-                log_info.append(f"Page {page} 筆數: {len(items)}")
+                items = r.json().get("result", {}).get("data", [])
                 if not items:
                     break
                 all_programs.extend(items)
             else:
                 break
-        except Exception as e:
-            log_info.append(f"Page {page} 錯誤: {str(e)}")
+        except Exception:
             break
-    return all_programs, log_info
+    return all_programs
 
 if start_btn:
     if not selected_cats:
@@ -232,47 +227,39 @@ if start_btn:
 
         if target_platform == "OPENTIX":
             status_box.info("正在連線 OPENTIX 官方伺服器即時擷取在售節目...")
-            programs, debug_logs = fetch_opentix_direct()
+            programs = fetch_opentix_direct()
             pbar.progress(50)
-
-            # 顯示除錯資訊給使用者看連線狀態
-            with st.expander("🔍 OPENTIX 連線除錯資訊", expanded=(len(programs) == 0)):
-                for log in debug_logs:
-                    st.write(log)
-                st.write(f"總共抓到原始資料：{len(programs)} 筆")
 
             for prog in programs:
                 title = prog.get("name", "").strip()
                 cat = prog.get("displayCategory", "其他")
+                
+                matched_cat = "其他"
+                for c in ["戲劇", "音樂", "舞蹈", "親子", "戲曲"]:
+                    if c in cat:
+                        matched_cat = c
+                        break
+                
+                if matched_cat not in selected_cats and "其他" not in selected_cats:
+                    continue
+
                 prog_id = prog.get("id", "")
                 link = f"https://www.opentix.life/event/{prog_id}" if prog_id else "https://www.opentix.life"
-                cities = "、".join(prog.get("cities", [])) if prog.get("cities") else "全台"
+                cities = "、".join(prog.get("cities", [])) if prog.get("cities") else "全台巡演"
                 fest = extract_festival(title, "", custom_fest_list)
                 performer = extract_performer(title)
-
-                # 轉換時間戳
-                s_ts = prog.get("startDateTime")
-                e_ts = prog.get("endDateTime")
-                time_str = "即期 (詳見售票頁)"
-                
-                # 如果時間戳是秒級別或毫秒級別
-                if s_ts:
-                    try:
-                        ts_val = s_ts / 1000 if s_ts > 10000000000 else s_ts
-                        s_dt = datetime.datetime.fromtimestamp(ts_val).date()
-                        time_str = s_dt.strftime("%Y-%m-%d")
-                    except Exception:
-                        pass
 
                 events = prog.get("events", [])
                 if events:
                     for ev in events:
                         ev_start = ev.get("startDateTime")
-                        ev_str = time_str
+                        ev_str = "即期 (詳見售票頁)"
                         if ev_start:
                             try:
                                 ts_v = ev_start / 1000 if ev_start > 10000000000 else ev_start
                                 ev_dt = datetime.datetime.fromtimestamp(ts_v)
+                                if not (start_date <= ev_dt.date() <= end_date):
+                                    continue
                                 ev_str = ev_dt.strftime("%Y-%m-%d %H:%M")
                             except Exception:
                                 pass
@@ -280,7 +267,7 @@ if start_btn:
                         detail_records.append({
                             "售票通路": "OPENTIX",
                             "所屬藝術節/系列": fest,
-                            "節目分類": cat,
+                            "節目分類": matched_cat,
                             "演出單位": performer,
                             "節目名稱": title,
                             "演出場次時間": ev_str,
@@ -291,10 +278,10 @@ if start_btn:
                     detail_records.append({
                         "售票通路": "OPENTIX",
                         "所屬藝術節/系列": fest,
-                        "節目分類": cat,
+                        "節目分類": matched_cat,
                         "演出單位": performer,
                         "節目名稱": title,
-                        "演出場次時間": time_str,
+                        "演出場次時間": "即期 (詳見售票頁)",
                         "演出地點": cities,
                         "售票狀況/連結": link
                     })
@@ -353,7 +340,7 @@ if start_btn:
         if not detail_records:
             status_box.empty()
             pbar.empty()
-            st.warning(f"💡 在所選的【{selected_platform_label}】平台與條件下未找到節目。")
+            st.warning(f"💡 在所選的【{selected_platform_label}】平台與條件下未找到符合條件的節目。建議放寬日期區間。")
         else:
             df_details = pd.DataFrame(detail_records)
             summary_list = []
